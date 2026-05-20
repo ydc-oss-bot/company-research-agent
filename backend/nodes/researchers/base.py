@@ -11,6 +11,7 @@ from tavily import AsyncTavilyClient
 from ...classes import ResearchState
 from ...classes.state import job_status
 from ...utils.references import clean_title
+from ...utils.you_finance_client import YouFinanceResearchClient
 from ...prompts import QUERY_FORMAT_GUIDELINES
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,13 @@ class BaseResearcher:
             api_key=openai_key
         )
         self.analyst_type = "base_researcher"
+
+        # Optional You.com Finance Research client (used for financial analysis)
+        you_key = os.getenv("YOU_API_KEY")
+        if you_key:
+            self.you_finance_client = YouFinanceResearchClient(api_key=you_key)
+        else:
+            self.you_finance_client = None
 
     @property
     def analyst_type(self) -> str:
@@ -211,27 +219,47 @@ class BaseResearcher:
         }
 
         # Execute all searches in parallel
-        search_params = self._get_search_params()
-        search_tasks = [self.tavily_client.search(query, **search_params) for query in queries]
-
-        try:
-            results = await asyncio.gather(*search_tasks, return_exceptions=True)
-        except Exception as e:
-            logger.error(f"Error during parallel search execution: {e}")
-            yield {"type": "error", "error": str(e)}
-            return
-
-        # Process and merge results
         merged_docs = {}
-        for query, result in zip(queries, results):
-            if isinstance(result, Exception):
-                logger.error(f"Search failed for query '{query}': {result}")
-                yield {"type": "query_error", "query": query, "error": str(result)}
-                continue
-                
-            for item in result.get("results", []):
-                if doc := self._process_search_result(item, query):
-                    merged_docs[doc["url"]] = doc
+
+        if self.analyst_type == "financial_analyzer" and self.you_finance_client:
+            # Use You.com Finance Research API for financial queries
+            search_tasks = [self.you_finance_client.search(query) for query in queries]
+            try:
+                results = await asyncio.gather(*search_tasks, return_exceptions=True)
+            except Exception as e:
+                logger.error(f"Error during parallel You.com search execution: {e}")
+                yield {"type": "error", "error": str(e)}
+                return
+
+            for query, result in zip(queries, results):
+                if isinstance(result, Exception):
+                    logger.error(f"You.com search failed for query '{query}': {result}")
+                    yield {"type": "query_error", "query": query, "error": str(result)}
+                    continue
+                docs = self.you_finance_client.to_documents(result, query)
+                merged_docs.update(docs)
+        else:
+            # Fallback to Tavily for all other analyst types
+            search_params = self._get_search_params()
+            search_tasks = [self.tavily_client.search(query, **search_params) for query in queries]
+
+            try:
+                results = await asyncio.gather(*search_tasks, return_exceptions=True)
+            except Exception as e:
+                logger.error(f"Error during parallel search execution: {e}")
+                yield {"type": "error", "error": str(e)}
+                return
+
+            # Process and merge results
+            for query, result in zip(queries, results):
+                if isinstance(result, Exception):
+                    logger.error(f"Search failed for query '{query}': {result}")
+                    yield {"type": "query_error", "query": query, "error": str(result)}
+                    continue
+                    
+                for item in result.get("results", []):
+                    if doc := self._process_search_result(item, query):
+                        merged_docs[doc["url"]] = doc
 
         # Yield completion event
         yield {
