@@ -34,7 +34,7 @@ class BaseResearcher:
         self.analyst_type = "base_researcher"
 
         # Optional You.com Finance Research client (used for financial analysis)
-        you_key = os.getenv("YOU_API_KEY")
+        you_key = os.getenv("YDC_API_KEY")
         if you_key:
             self.you_finance_client = YouFinanceResearchClient(api_key=you_key)
         else:
